@@ -1,0 +1,21 @@
+FROM golang:1.21.5 as builder
+
+WORKDIR /app
+
+COPY go.mod .
+COPY go.sum .
+
+RUN go mod download
+
+COPY ./ ./
+
+RUN go test ./...
+
+RUN GOOS=linux GOARCH=arm GOARM=5 CGO_ENABLED=0 go build
+
+FROM alpine:3.14.0
+
+COPY --from=builder /app/lxp-bridge-statsd /bin/lxp-bridge-statsd
+WORKDIR /var/lib/lxp-bridge-statsd/
+
+CMD ["/bin/lxp-bridge-statsd","-configFile=/var/lib/lxp-bridge-statsd/config.json"]
