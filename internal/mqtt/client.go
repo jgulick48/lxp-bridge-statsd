@@ -41,6 +41,7 @@ type client struct {
 	messages   chan mqtt.Message
 	debug      bool
 	values     map[string]map[string]float64
+	soc        int
 }
 
 func (c *client) Close() {
@@ -75,6 +76,7 @@ func (c *client) Connect() {
 
 func (c *client) keepAlive() {
 	ticker := time.NewTicker(10 * time.Second)
+	ticker2 := time.NewTicker(1 * time.Minute)
 	for {
 		select {
 		case <-c.done:
@@ -84,6 +86,13 @@ func (c *client) keepAlive() {
 				token := c.mqttClient.Publish(fmt.Sprintf("lxp/cmd/%s/read/inputs/1", deviceID), 0, true, "")
 				token.Wait()
 				token = c.mqttClient.Publish(fmt.Sprintf("lxp/cmd/%s/read/inputs/2", deviceID), 0, true, "")
+				token.Wait()
+				token = c.mqttClient.Publish(fmt.Sprintf("lxp/cmd/%s/read/inputs/4", deviceID), 0, true, "")
+				token.Wait()
+			}
+		case <-ticker2.C:
+			for _, deviceID := range c.config.DeviceIDs {
+				token := c.mqttClient.Publish(fmt.Sprintf("lxp/cmd/%s/read/inputs/3", deviceID), 0, true, "")
 				token.Wait()
 			}
 		}
@@ -137,7 +146,7 @@ func (c *client) GetDataParser(segments []string, defaultParser func(topic []str
 		return defaultParser
 	}
 	switch segments[3] {
-	case "1", "2", "all":
+	case "1", "2", "3", "4", "all":
 		return c.ParseInputs
 	default:
 		return defaultParser
@@ -153,14 +162,58 @@ func (c *client) ParseInputs(segments []string, message models.MessageJson) {
 		metrics.FormatTag("deploymentID", segments[1]),
 	}
 	for key, value := range message {
+
 		switch key {
 		case "time", "runtime", "datalog":
 			continue
+		case "max_chg_curr", "max_dischg_curr", "bat_current":
+			switch v := value.(type) {
+			case int:
+				if key == "bat_current" && v > 300 {
+					v = v - 656
+				}
+				metrics.SendIntGaugeMetric(fmt.Sprintf("%s_%s", metricPrefix, key), baseTags, v*10)
+			case float64:
+				if key == "bat_current" && v > 300 {
+					v = v - 655.36
+				}
+				metrics.SendGaugeMetric(fmt.Sprintf("%s_%s", metricPrefix, key), baseTags, v*10)
+			}
 		default:
 			switch v := value.(type) {
 			case int:
+				if key == "soc" {
+					c.soc = v
+				}
+				if key == "p_battery" {
+					power := v
+					if c.soc >= 98 {
+						power = 1700
+
+					} else if c.soc <= 95 {
+						power = -400
+					}
+					log.Printf("Sending value %v to mqtt", power)
+					token := c.mqttClient.Publish(fmt.Sprintf("lxp/sensor/%s/read/power1", segments[1]), 0, true, fmt.Sprintf("%v", 0-power))
+					token.Wait()
+				}
 				metrics.SendIntGaugeMetric(fmt.Sprintf("%s_%s", metricPrefix, key), baseTags, v)
 			case float64:
+				if key == "soc" {
+					c.soc = int(v)
+				}
+				if key == "p_battery" {
+					power := v
+					if c.soc >= 98 {
+						power = 1700
+
+					} else if c.soc <= 95 {
+						power = -400
+					}
+					log.Printf("Sending value %v to mqtt", power)
+					token := c.mqttClient.Publish(fmt.Sprintf("lxp/sensor/%s/read/power1", segments[1]), 0, true, fmt.Sprintf("%v", 0-power))
+					token.Wait()
+				}
 				metrics.SendGaugeMetric(fmt.Sprintf("%s_%s", metricPrefix, key), baseTags, v)
 			}
 		}
